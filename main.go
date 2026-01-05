@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -15,6 +14,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	_ "github.com/marcboeker/go-duckdb/v2"
 	_ "modernc.org/sqlite"
 )
 
@@ -192,29 +192,32 @@ func getConnectionStringByID(idDB int) (string, error) {
 }
 
 type QueryConfig struct {
-	Widths map[string]int `json:"widths"`
+	Widths  map[string]int    `json:"widths"`
+	Aliases map[string]string `json:"aliases"`
 }
 
-func getQueryConfig(sqlName string) (map[string]int, error) {
+func getQueryConfig(sqlName string) (map[string]int, map[string]string, error) {
 	var configJSON sql.NullString
 	err := sqliteDB.QueryRow("SELECT config FROM queries WHERE name = ?", sqlName).Scan(&configJSON)
 	if err != nil {
-		return nil, err
+		// log.Printf("getQueryConfig: error selecting config: %v", err)
+		return nil, nil, err
 	}
 
 	if !configJSON.Valid || configJSON.String == "" {
-		return make(map[string]int), nil
+		return make(map[string]int), make(map[string]string), nil
 	}
 
-	var widths map[string]int
-	err = json.Unmarshal([]byte(configJSON.String), &widths)
+	var config QueryConfig
+	err = json.Unmarshal([]byte(configJSON.String), &config)
 	if err != nil {
-		return nil, err
+		// log.Printf("getQueryConfig: error unmarshaling: %v", err)
+		return nil, nil, err
 	}
-	return widths, nil
+	return config.Widths, config.Aliases, nil
 }
 
-func applyColumnWidths(columns []table.Column, widths map[string]int) []table.Column {
+func applyColumnWidths(columns []table.Column, widths map[string]int, aliases map[string]string) []table.Column {
 	for i := range columns {
 		fieldName := strings.ToUpper(columns[i].Title)
 		if width, ok := widths[fieldName]; ok {
@@ -222,20 +225,27 @@ func applyColumnWidths(columns []table.Column, widths map[string]int) []table.Co
 		} else {
 			columns[i].Width = 20
 		}
+		if alias, ok := aliases[fieldName]; ok {
+			columns[i].Title = alias
+		}
 	}
 	return columns
 }
 
 func insertConfig(idItem int, row table.Row, columns []table.Column) error {
+	// log.Println("insertConfig: idItem=%d, columns=%d, row=%v\n", idItem, len(columns), row)
+
 	for i, col := range columns {
 		if i < len(row) {
 			varName := strings.ToUpper(col.Title)
 			varValue := row[i]
+			// log.Println("insertConfig: inserting id_item=%d, var=%s, val=%s\n", idItem, varName, varValue)
 			_, err := sqliteDB.Exec(
 				"INSERT OR REPLACE INTO config (id_item, var, val) VALUES (?, ?, ?)",
 				idItem, varName, varValue,
 			)
 			if err != nil {
+				// log.Println("insertConfig: error inserting: %v\n", err)
 				return err
 			}
 		}
@@ -243,14 +253,18 @@ func insertConfig(idItem int, row table.Row, columns []table.Column) error {
 	return nil
 }
 
-func saveToConfig(itemName string, idDB int, row table.Row, columns []table.Column) error {
+func saveToConfig(itemName string, idDB int, row table.Row, columns []table.Column, aliases map[string]string) error {
+	// log.Println("saveToConfig: itemName=%s, idDB=%d\n", itemName, idDB)
 	if err := insertItemIfNotExists(itemName, idDB); err != nil {
+		// log.Println("saveToConfig: insertItemIfNotExists error: %v\n", err)
 		return err
 	}
 	idItem, err := getItemID(itemName)
 	if err != nil {
+		// log.Println("saveToConfig: getItemID error: %v\n", err)
 		return err
 	}
+	// log.Println("saveToConfig: got idItem=%d\n", idItem)
 	return insertConfig(idItem, row, columns)
 }
 
@@ -272,12 +286,33 @@ func (database *databaseType) Connect(driver string, connectionString string) er
 	if err = db.Ping(); err != nil {
 		return err
 	}
+
+	if driver == "duckdb" {
+		if err := executeDuckDBRC(db); err != nil {
+			return err
+		}
+	}
+
 	database.DB = db
 	database.ConnectionString = connectionString
 	return nil
 }
 
+func executeDuckDBRC(db *sql.DB) error {
+	rcPath := filepath.Join(os.Getenv("HOME"), ".duckdbrc")
+	data, err := os.ReadFile(rcPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	_, err = db.Exec(string(data))
+	return err
+}
+
 func getContent(sqlQuery string) ([]table.Row, []table.Column, error) {
+	// log.Println(sqlQuery)
 	query := sqlQuery
 	rows, err := database.Query(query)
 	if err != nil {
@@ -328,6 +363,7 @@ type model struct {
 	itemName string
 	sqlQuery string
 	idDB     int
+	aliases  map[string]string
 }
 
 func (m model) Init() tea.Cmd { return nil }
@@ -348,7 +384,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			row := m.table.SelectedRow()
 			cols := m.table.Columns()
-			if err := saveToConfig(m.itemName, m.idDB, row, cols); err != nil {
+			if err := saveToConfig(m.itemName, m.idDB, row, cols, m.aliases); err != nil {
 				return m, tea.Batch(
 					tea.Printf("\nError saving to config: %v\n", err),
 				)
@@ -371,79 +407,86 @@ func main() {
 	flag.Parse()
 
 	if *itemName == "" {
-		log.Println("Error: -item flag is required")
+		// log.Println("Error: -item flag is required")
 		os.Exit(1)
 	}
 
 	if *sqlName == "" {
-		log.Println("Error: -sql flag is required")
+		// log.Println("Error: -sql flag is required")
 		os.Exit(1)
 	}
 
 	if *dbName == "" {
-		log.Println("Error: -db flag is required")
+		// log.Println("Error: -db flag is required")
 		os.Exit(1)
 	}
 
 	if err := initSqliteDB(); err != nil {
-		log.Println("Error initializing SQLite DB:", err)
+		// log.Println("Error initializing SQLite DB:", err)
 		os.Exit(1)
 	}
 
 	idDB, err := getDBID(*dbName)
 	if err != nil {
-		log.Println("Error getting DB ID:", err)
+		// log.Println("Error getting DB ID:", err)
 		os.Exit(1)
 	}
 
 	driver, err := getDBDriverByID(idDB)
 	if err != nil {
-		log.Println("Error getting DB driver:", err)
+		// log.Println("Error getting DB driver:", err)
 		os.Exit(1)
 	}
 
 	connectionString, err := getConnectionStringByID(idDB)
 	if err != nil {
-		log.Println("Error getting connection string:", err)
+		// log.Println("Error getting connection string:", err)
 		os.Exit(1)
 	}
 
 	sqlQuery, err := getQueryFromDB(*sqlName)
 	if err != nil {
-		log.Println("Error getting query from DB:", err)
+		// log.Println("Error getting query from DB:", err)
 		os.Exit(1)
 	}
 
-	queryConfig, err := getQueryConfig(*sqlName)
+	widths, aliases, err := getQueryConfig(*sqlName)
 	if err != nil {
-		log.Println("Error getting query config:", err)
+		// log.Println("Error getting query config:", err)
 		os.Exit(1)
 	}
 
 	if err := database.Connect(driver, connectionString); err != nil {
-		log.Println("Error connecting to database:", err)
+		// log.Println("Error connecting to database:", err)
 		os.Exit(1)
 	}
 	defer database.Close()
 
 	rows, columns, err := getContent(sqlQuery)
 	if err != nil {
-		log.Println("Error getting content:", err)
+		// log.Println("Error getting content:", err)
 		os.Exit(1)
 	}
 
 	if len(rows) == 0 || len(columns) == 0 {
-		log.Println("Error: no data returned")
+		// log.Println("Error: no data returned")
 		os.Exit(1)
 	}
 
-	columns = applyColumnWidths(columns, queryConfig)
+	columns = applyColumnWidths(columns, widths, aliases)
+
+	tblHeight := 10
+	// if len(rows) < 10 {
+	// 	tblHeight = len(rows) + 1
+	// } else {
+	// 	tblHeight = 50
+	// }
 
 	t := table.New(
 		table.WithColumns(columns),
 		table.WithRows(rows),
 		table.WithFocused(true),
-		table.WithHeight(7),
+		table.WithHeight(tblHeight),
 	)
 
 	s := table.DefaultStyles()
@@ -458,7 +501,7 @@ func main() {
 		Bold(false)
 	t.SetStyles(s)
 
-	m := model{t, *itemName, sqlQuery, idDB}
+	m := model{t, *itemName, sqlQuery, idDB, aliases}
 	if _, err := tea.NewProgram(m).Run(); err != nil {
 		fmt.Println("Error running program:", err)
 		os.Exit(1)
