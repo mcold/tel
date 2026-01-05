@@ -53,25 +53,35 @@ func initSqliteDB() error {
 	}
 
 	ddl := `
+	CREATE TABLE IF NOT EXISTS dbs(
+		id      INTEGER PRIMARY KEY AUTOINCREMENT
+		, name	STRING UNIQUE
+		, connect TEXT
+		, comment TEXT
+	);
+
 	CREATE TABLE IF NOT EXISTS items(
 		id      INTEGER PRIMARY KEY AUTOINCREMENT
+		, id_db	INTEGER
 		, name  TEXT
+		, FOREIGN KEY (id_db) REFERENCES dbs(id)
 	);
 
 	CREATE TABLE IF NOT EXISTS config
 	(
 		id_item INTEGER
-		, var TEXT
+		, var STRING UNIQUE
 		, val TEXT
 		, PRIMARY KEY (id_item, var)
 		, FOREIGN KEY (id_item) REFERENCES items(id)
 	);
 
-	CREATE TABLE SQL
+	CREATE TABLE queries
 	(
 		id_item INTEGER
-		, query text
-		, config text
+		, name STRING UNIQUE
+		, query TEXT
+		, config TEXT
 		, FOREIGN KEY (id_item) REFERENCES items(id)
 	);
 	`
@@ -80,19 +90,85 @@ func initSqliteDB() error {
 	return nil
 }
 
-func insertItemIfNotExists(item string) error {
+func insertItemIfNotExists(item string, idDB int) error {
 	var count int
 	err := sqliteDB.QueryRow("SELECT COUNT(*) FROM items WHERE name = ?", item).Scan(&count)
 	if err != nil {
 		return err
 	}
 	if count == 0 {
-		_, err = sqliteDB.Exec("INSERT INTO items (name) VALUES (?)", item)
+		_, err = sqliteDB.Exec("INSERT INTO items (name, id_db) VALUES (?, ?)", item, idDB)
 		if err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func getConnectionString(dbName string) (string, error) {
+	var connect string
+	err := sqliteDB.QueryRow("SELECT connect FROM dbs WHERE name = ?", dbName).Scan(&connect)
+	if err != nil {
+		return "", err
+	}
+	return connect, nil
+}
+
+func getDBID(dbName string) (int, error) {
+	var id int
+	err := sqliteDB.QueryRow("SELECT id FROM dbs WHERE name = ?", dbName).Scan(&id)
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+func getQueryFromDB(sqlName string) (string, error) {
+	var query string
+	err := sqliteDB.QueryRow("SELECT query FROM queries WHERE name = ?", sqlName).Scan(&query)
+	if err != nil {
+		return "", err
+	}
+	return query, nil
+}
+
+func getItemID(itemName string) (int, error) {
+	var id int
+	err := sqliteDB.QueryRow("SELECT id FROM items WHERE name = ?", itemName).Scan(&id)
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+func getDBIDFromItem(itemID int) (int, error) {
+	var idDB int
+	err := sqliteDB.QueryRow("SELECT id_db FROM items WHERE id = ?", itemID).Scan(&idDB)
+	if err != nil {
+		return 0, err
+	}
+	return idDB, nil
+}
+
+func getConnectionStringByItem(itemName string) (string, error) {
+	itemID, err := getItemID(itemName)
+	if err != nil {
+		return "", err
+	}
+	idDB, err := getDBIDFromItem(itemID)
+	if err != nil {
+		return "", err
+	}
+	return getConnectionStringByID(idDB)
+}
+
+func getConnectionStringByID(idDB int) (string, error) {
+	var connect string
+	err := sqliteDB.QueryRow("SELECT connect FROM dbs WHERE id = ?", idDB).Scan(&connect)
+	if err != nil {
+		return "", err
+	}
+	return connect, nil
 }
 
 func insertConfig(item string, row table.Row, columns []table.Column) error {
@@ -112,11 +188,11 @@ func insertConfig(item string, row table.Row, columns []table.Column) error {
 	return nil
 }
 
-func saveToConfig(item string, row table.Row, columns []table.Column) error {
-	if err := insertItemIfNotExists(item); err != nil {
+func saveToConfig(itemName string, idDB int, row table.Row, columns []table.Column) error {
+	if err := insertItemIfNotExists(itemName, idDB); err != nil {
 		return err
 	}
-	return insertConfig(item, row, columns)
+	return insertConfig(itemName, row, columns)
 }
 
 type databaseType struct {
@@ -128,9 +204,8 @@ type databaseType struct {
 var database databaseType
 var sqliteDB *sql.DB
 
-func (database *databaseType) Connect() error {
-	database.ConnectionString = "postgresql://postgres:postgres@localhost:5432/postgres?sslmode=disable"
-	db, err := sql.Open("pgx", database.ConnectionString)
+func (database *databaseType) Connect(connectionString string) error {
+	db, err := sql.Open("pgx", connectionString)
 	if err != nil {
 		return err
 	}
@@ -139,11 +214,12 @@ func (database *databaseType) Connect() error {
 		return err
 	}
 	database.DB = db
+	database.ConnectionString = connectionString
 	return nil
 }
 
-func getContent() ([]table.Row, []table.Column, error) {
-	query := `select oid::text as oid, nspname, nspowner::text as nspowner, nspacl::text as nspacl from pg_namespace`
+func getContent(sqlQuery string) ([]table.Row, []table.Column, error) {
+	query := sqlQuery
 	rows, err := database.Query(query)
 	if err != nil {
 		return nil, nil, err
@@ -191,6 +267,8 @@ func getContent() ([]table.Row, []table.Column, error) {
 type model struct {
 	table    table.Model
 	itemName string
+	sqlQuery string
+	idDB     int
 }
 
 func (m model) Init() tea.Cmd { return nil }
@@ -211,7 +289,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			row := m.table.SelectedRow()
 			cols := m.table.Columns()
-			if err := saveToConfig(m.itemName, row, cols); err != nil {
+			if err := saveToConfig(m.itemName, m.idDB, row, cols); err != nil {
 				return m, tea.Batch(
 					tea.Printf("\nError saving to config: %v\n", err),
 				)
@@ -229,10 +307,22 @@ func (m model) View() string {
 
 func main() {
 	itemName := flag.String("item", "", "Item name for config")
+	sqlName := flag.String("sql", "", "SQL query name in queries table")
+	dbName := flag.String("db", "", "Database name in dbs table")
 	flag.Parse()
 
 	if *itemName == "" {
 		log.Println("Error: -item flag is required")
+		os.Exit(1)
+	}
+
+	if *sqlName == "" {
+		log.Println("Error: -sql flag is required")
+		os.Exit(1)
+	}
+
+	if *dbName == "" {
+		log.Println("Error: -db flag is required")
 		os.Exit(1)
 	}
 
@@ -241,13 +331,31 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := database.Connect(); err != nil {
+	idDB, err := getDBID(*dbName)
+	if err != nil {
+		log.Println("Error getting DB ID:", err)
+		os.Exit(1)
+	}
+
+	connectionString, err := getConnectionStringByID(idDB)
+	if err != nil {
+		log.Println("Error getting connection string:", err)
+		os.Exit(1)
+	}
+
+	sqlQuery, err := getQueryFromDB(*sqlName)
+	if err != nil {
+		log.Println("Error getting query from DB:", err)
+		os.Exit(1)
+	}
+
+	if err := database.Connect(connectionString); err != nil {
 		log.Println("Error connecting to database:", err)
 		os.Exit(1)
 	}
 	defer database.Close()
 
-	rows, columns, err := getContent()
+	rows, columns, err := getContent(sqlQuery)
 	if err != nil {
 		log.Println("Error getting content:", err)
 		os.Exit(1)
@@ -277,7 +385,7 @@ func main() {
 		Bold(false)
 	t.SetStyles(s)
 
-	m := model{t, *itemName}
+	m := model{t, *itemName, sqlQuery, idDB}
 	if _, err := tea.NewProgram(m).Run(); err != nil {
 		fmt.Println("Error running program:", err)
 		os.Exit(1)
