@@ -2,3 +2,5 @@ tel
 *.log
 old/
 todo
+zel/
+*test*

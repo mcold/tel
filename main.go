@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -55,6 +56,7 @@ func initSqliteDB() error {
 	ddl := `
 	CREATE TABLE IF NOT EXISTS dbs(
 		id      INTEGER PRIMARY KEY AUTOINCREMENT
+		, driver STRING NOT NULL
 		, name	STRING UNIQUE
 		, connect TEXT
 		, comment TEXT
@@ -123,6 +125,24 @@ func getDBID(dbName string) (int, error) {
 	return id, nil
 }
 
+func getDBDriver(dbName string) (string, error) {
+	var driver string
+	err := sqliteDB.QueryRow("SELECT driver FROM dbs WHERE name = ?", dbName).Scan(&driver)
+	if err != nil {
+		return "", err
+	}
+	return driver, nil
+}
+
+func getDBDriverByID(idDB int) (string, error) {
+	var driver string
+	err := sqliteDB.QueryRow("SELECT driver FROM dbs WHERE id = ?", idDB).Scan(&driver)
+	if err != nil {
+		return "", err
+	}
+	return driver, nil
+}
+
 func getQueryFromDB(sqlName string) (string, error) {
 	var query string
 	err := sqliteDB.QueryRow("SELECT query FROM queries WHERE name = ?", sqlName).Scan(&query)
@@ -171,14 +191,49 @@ func getConnectionStringByID(idDB int) (string, error) {
 	return connect, nil
 }
 
-func insertConfig(item string, row table.Row, columns []table.Column) error {
+type QueryConfig struct {
+	Widths map[string]int `json:"widths"`
+}
+
+func getQueryConfig(sqlName string) (map[string]int, error) {
+	var configJSON sql.NullString
+	err := sqliteDB.QueryRow("SELECT config FROM queries WHERE name = ?", sqlName).Scan(&configJSON)
+	if err != nil {
+		return nil, err
+	}
+
+	if !configJSON.Valid || configJSON.String == "" {
+		return make(map[string]int), nil
+	}
+
+	var widths map[string]int
+	err = json.Unmarshal([]byte(configJSON.String), &widths)
+	if err != nil {
+		return nil, err
+	}
+	return widths, nil
+}
+
+func applyColumnWidths(columns []table.Column, widths map[string]int) []table.Column {
+	for i := range columns {
+		fieldName := strings.ToUpper(columns[i].Title)
+		if width, ok := widths[fieldName]; ok {
+			columns[i].Width = width
+		} else {
+			columns[i].Width = 20
+		}
+	}
+	return columns
+}
+
+func insertConfig(idItem int, row table.Row, columns []table.Column) error {
 	for i, col := range columns {
 		if i < len(row) {
 			varName := strings.ToUpper(col.Title)
 			varValue := row[i]
 			_, err := sqliteDB.Exec(
 				"INSERT OR REPLACE INTO config (id_item, var, val) VALUES (?, ?, ?)",
-				item, varName, varValue,
+				idItem, varName, varValue,
 			)
 			if err != nil {
 				return err
@@ -192,7 +247,11 @@ func saveToConfig(itemName string, idDB int, row table.Row, columns []table.Colu
 	if err := insertItemIfNotExists(itemName, idDB); err != nil {
 		return err
 	}
-	return insertConfig(itemName, row, columns)
+	idItem, err := getItemID(itemName)
+	if err != nil {
+		return err
+	}
+	return insertConfig(idItem, row, columns)
 }
 
 type databaseType struct {
@@ -204,8 +263,8 @@ type databaseType struct {
 var database databaseType
 var sqliteDB *sql.DB
 
-func (database *databaseType) Connect(connectionString string) error {
-	db, err := sql.Open("pgx", connectionString)
+func (database *databaseType) Connect(driver string, connectionString string) error {
+	db, err := sql.Open(driver, connectionString)
 	if err != nil {
 		return err
 	}
@@ -337,6 +396,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	driver, err := getDBDriverByID(idDB)
+	if err != nil {
+		log.Println("Error getting DB driver:", err)
+		os.Exit(1)
+	}
+
 	connectionString, err := getConnectionStringByID(idDB)
 	if err != nil {
 		log.Println("Error getting connection string:", err)
@@ -349,7 +414,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := database.Connect(connectionString); err != nil {
+	queryConfig, err := getQueryConfig(*sqlName)
+	if err != nil {
+		log.Println("Error getting query config:", err)
+		os.Exit(1)
+	}
+
+	if err := database.Connect(driver, connectionString); err != nil {
 		log.Println("Error connecting to database:", err)
 		os.Exit(1)
 	}
@@ -365,6 +436,8 @@ func main() {
 		log.Println("Error: no data returned")
 		os.Exit(1)
 	}
+
+	columns = applyColumnWidths(columns, queryConfig)
 
 	t := table.New(
 		table.WithColumns(columns),
