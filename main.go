@@ -60,15 +60,24 @@ func initSqliteDB() error {
 
 	CREATE TABLE IF NOT EXISTS config
 	(
-		id_item TEXT
+		id_item INTEGER
 		, var TEXT
 		, val TEXT
 		, PRIMARY KEY (id_item, var)
+		, FOREIGN KEY (id_item) REFERENCES items(id)
+	);
+
+	CREATE TABLE SQL
+	(
+		id_item INTEGER
+		, query text
+		, config text
+		, FOREIGN KEY (id_item) REFERENCES items(id)
 	);
 	`
 
-	_, err = sqliteDB.Exec(ddl)
-	return err
+	_, _ = sqliteDB.Exec(ddl)
+	return nil
 }
 
 func insertItemIfNotExists(item string) error {
@@ -82,7 +91,6 @@ func insertItemIfNotExists(item string) error {
 		if err != nil {
 			return err
 		}
-		log.Printf("Item '%s' inserted", item)
 	}
 	return nil
 }
@@ -134,28 +142,50 @@ func (database *databaseType) Connect() error {
 	return nil
 }
 
-func getContent() ([]table.Row, error) {
+func getContent() ([]table.Row, []table.Column, error) {
 	query := `select oid::text as oid, nspname, nspowner::text as nspowner, nspacl::text as nspacl from pg_namespace`
 	rows, err := database.Query(query)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, nil, err
+	}
+
 	var result []table.Row
 	for rows.Next() {
-		var oid, nspowner string
-		var nspname, nspacl sql.NullString
-		if err := rows.Scan(&oid, &nspname, &nspowner, &nspacl); err != nil {
-			return nil, err
+		values := make([]interface{}, len(cols))
+		pointers := make([]interface{}, len(cols))
+		for i := range values {
+			pointers[i] = &values[i]
 		}
-		nspaclStr := ""
-		if nspacl.Valid {
-			nspaclStr = nspacl.String
+		if err := rows.Scan(pointers...); err != nil {
+			return nil, nil, err
 		}
-		result = append(result, table.Row{oid, nspname.String, nspowner, nspaclStr})
+		row := make(table.Row, len(cols))
+		for i, v := range values {
+			switch val := v.(type) {
+			case nil:
+				row[i] = ""
+			case []byte:
+				row[i] = string(val)
+			case string:
+				row[i] = val
+			default:
+				row[i] = fmt.Sprintf("%v", val)
+			}
+		}
+		result = append(result, row)
 	}
-	return result, nil
+
+	tableCols := make([]table.Column, len(cols))
+	for i, col := range cols {
+		tableCols[i] = table.Column{Title: strings.ToUpper(col), Width: 20}
+	}
+	return result, tableCols, nil
 }
 
 type model struct {
@@ -186,9 +216,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					tea.Printf("\nError saving to config: %v\n", err),
 				)
 			}
-			return m, tea.Batch(
-				tea.Printf("\n✓ Saved to config for item: %s\n", m.itemName),
-			)
+			return m, tea.Batch()
 		}
 	}
 	m.table, cmd = m.table.Update(msg)
@@ -219,17 +247,15 @@ func main() {
 	}
 	defer database.Close()
 
-	rows, err := getContent()
+	rows, columns, err := getContent()
 	if err != nil {
 		log.Println("Error getting content:", err)
 		os.Exit(1)
 	}
 
-	columns := []table.Column{
-		{Title: "OID", Width: 10},
-		{Title: "Nspname", Width: 20},
-		{Title: "Nspowner", Width: 10},
-		{Title: "Nspacl", Width: 20},
+	if len(rows) == 0 || len(columns) == 0 {
+		log.Println("Error: no data returned")
+		os.Exit(1)
 	}
 
 	t := table.New(
