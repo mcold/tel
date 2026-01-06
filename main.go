@@ -84,6 +84,7 @@ func initSqliteDB() error {
 		, name STRING UNIQUE
 		, query TEXT
 		, config TEXT
+		, height INTEGER DEFAULT 10
 		, FOREIGN KEY (id_item) REFERENCES items(id)
 	);
 	`
@@ -194,27 +195,34 @@ func getConnectionStringByID(idDB int) (string, error) {
 type QueryConfig struct {
 	Widths  map[string]int    `json:"widths"`
 	Aliases map[string]string `json:"aliases"`
+	Height  int               `json:"height"`
 }
 
-func getQueryConfig(sqlName string) (map[string]int, map[string]string, error) {
+func getQueryConfig(sqlName string) (map[string]int, map[string]string, int, error) {
 	var configJSON sql.NullString
-	err := sqliteDB.QueryRow("SELECT config FROM queries WHERE name = ?", sqlName).Scan(&configJSON)
+	var tableHeight int
+	err := sqliteDB.QueryRow("SELECT config, COALESCE(height, 10) FROM queries WHERE name = ?", sqlName).Scan(&configJSON, &tableHeight)
 	if err != nil {
 		// log.Printf("getQueryConfig: error selecting config: %v", err)
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
 
 	if !configJSON.Valid || configJSON.String == "" {
-		return make(map[string]int), make(map[string]string), nil
+		return make(map[string]int), make(map[string]string), tableHeight, nil
 	}
 
 	var config QueryConfig
 	err = json.Unmarshal([]byte(configJSON.String), &config)
 	if err != nil {
 		// log.Printf("getQueryConfig: error unmarshaling: %v", err)
-		return nil, nil, err
+		return nil, nil, 0, err
 	}
-	return config.Widths, config.Aliases, nil
+
+	if config.Height == 0 {
+		config.Height = tableHeight
+	}
+
+	return config.Widths, config.Aliases, config.Height, nil
 }
 
 func applyColumnWidths(columns []table.Column, widths map[string]int, aliases map[string]string) []table.Column {
@@ -232,21 +240,19 @@ func applyColumnWidths(columns []table.Column, widths map[string]int, aliases ma
 	return columns
 }
 
-func insertConfig(idItem int, row table.Row, columns []table.Column) error {
-	// log.Println("insertConfig: idItem=%d, columns=%d, row=%v\n", idItem, len(columns), row)
-
+func insertConfig(idItem int, row table.Row, columns []table.Column, aliasToOriginal map[string]string) error {
 	for i, col := range columns {
 		if i < len(row) {
-			varName := strings.ToUpper(col.Title)
-			varValue := row[i]
-			// log.Println("insertConfig: inserting id_item=%d, var=%s, val=%s\n", idItem, varName, varValue)
-			_, err := sqliteDB.Exec(
-				"INSERT OR REPLACE INTO config (id_item, var, val) VALUES (?, ?, ?)",
-				idItem, varName, varValue,
-			)
-			if err != nil {
-				// log.Println("insertConfig: error inserting: %v\n", err)
-				return err
+			colTitle := strings.ToUpper(col.Title)
+			if _, ok := aliasToOriginal[colTitle]; ok {
+				varValue := row[i]
+				_, err := sqliteDB.Exec(
+					"INSERT OR REPLACE INTO config (id_item, var, val) VALUES (?, ?, ?)",
+					idItem, colTitle, varValue,
+				)
+				if err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -254,18 +260,20 @@ func insertConfig(idItem int, row table.Row, columns []table.Column) error {
 }
 
 func saveToConfig(itemName string, idDB int, row table.Row, columns []table.Column, aliases map[string]string) error {
-	// log.Println("saveToConfig: itemName=%s, idDB=%d\n", itemName, idDB)
 	if err := insertItemIfNotExists(itemName, idDB); err != nil {
-		// log.Println("saveToConfig: insertItemIfNotExists error: %v\n", err)
 		return err
 	}
 	idItem, err := getItemID(itemName)
 	if err != nil {
-		// log.Println("saveToConfig: getItemID error: %v\n", err)
 		return err
 	}
-	// log.Println("saveToConfig: got idItem=%d\n", idItem)
-	return insertConfig(idItem, row, columns)
+
+	aliasToOriginal := make(map[string]string)
+	for original, alias := range aliases {
+		aliasToOriginal[alias] = original
+	}
+
+	return insertConfig(idItem, row, columns, aliasToOriginal)
 }
 
 type databaseType struct {
@@ -363,6 +371,7 @@ type model struct {
 	itemName string
 	sqlQuery string
 	idDB     int
+	height   int
 	aliases  map[string]string
 }
 
@@ -450,7 +459,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	widths, aliases, err := getQueryConfig(*sqlName)
+	widths, aliases, tblHeight, err := getQueryConfig(*sqlName)
 	if err != nil {
 		// log.Println("Error getting query config:", err)
 		os.Exit(1)
@@ -475,12 +484,11 @@ func main() {
 
 	columns = applyColumnWidths(columns, widths, aliases)
 
-	tblHeight := 10
-	// if len(rows) < 10 {
-	// 	tblHeight = len(rows) + 1
-	// } else {
-	// 	tblHeight = 50
-	// }
+	if tblHeight == 0 {
+		tblHeight = 10
+	}
+
+	tblHeight = tblHeight + 1
 
 	t := table.New(
 		table.WithColumns(columns),
@@ -501,7 +509,7 @@ func main() {
 		Bold(false)
 	t.SetStyles(s)
 
-	m := model{t, *itemName, sqlQuery, idDB, aliases}
+	m := model{t, *itemName, sqlQuery, idDB, tblHeight, aliases}
 	if _, err := tea.NewProgram(m).Run(); err != nil {
 		fmt.Println("Error running program:", err)
 		os.Exit(1)
