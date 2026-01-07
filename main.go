@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -235,9 +234,6 @@ func applyColumnWidths(columns []table.Column, widths map[string]int, aliases ma
 		} else {
 			columns[i].Width = 20
 		}
-		// if alias, ok := aliases[fieldName]; ok {
-		// 	columns[i].Title = alias
-		// }
 	}
 	return columns
 }
@@ -367,10 +363,59 @@ type model struct {
 	table     table.Model
 	textInput textinput.Model
 	itemName  string
+	sqlName   string
 	sqlQuery  string
 	idDB      int
 	height    int
 	aliases   map[string]string
+}
+
+func (m model) filterContent(filter string) ([]table.Row, []table.Column, error) {
+	filter = strings.TrimSpace(filter)
+	filter = strings.TrimPrefix(filter, "WHERE")
+	filter = strings.TrimSpace(filter)
+
+	widths, aliases, _, err := getQueryConfig(m.sqlName)
+	if err != nil {
+		widths = make(map[string]int)
+		aliases = make(map[string]string)
+	}
+
+	var rows []table.Row
+	var cols []table.Column
+
+	if filter == "" {
+		rows, cols, err = getContent(m.sqlQuery)
+	} else {
+		wrappedQuery := fmt.Sprintf("SELECT * FROM (%s)", m.sqlQuery)
+		filteredQuery := fmt.Sprintf("%s WHERE %s", wrappedQuery, filter)
+		rows, cols, err = getContent(filteredQuery)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+
+	originalToAlias := make(map[string]string)
+	for original, alias := range aliases {
+		originalToAlias[original] = alias
+	}
+
+	for i := range cols {
+		colTitle := strings.ToUpper(cols[i].Title)
+
+		originalName := colTitle
+		if alias, ok := originalToAlias[colTitle]; ok {
+			originalName = alias
+		}
+
+		if width, ok := widths[originalName]; ok {
+			cols[i].Width = width
+		} else {
+			cols[i].Width = 20
+		}
+	}
+
+	return rows, cols, nil
 }
 
 func (m model) Init() tea.Cmd { return nil }
@@ -394,29 +439,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.table.Focus()
 			}
-		case "q", "ctrl+c":
+		case "ctrl+c":
 			return m, tea.Quit
 		case "enter":
-			row := m.table.SelectedRow()
-			cols := m.table.Columns()
-			if err := saveToConfig(m.itemName, m.idDB, row, cols, m.aliases); err != nil {
-				return m, tea.Batch(
-					tea.Printf("\nError saving to config: %v\n", err),
-				)
+			if m.textInput.Focused() {
+				filter := m.textInput.Value()
+				rows, cols, err := m.filterContent(filter)
+				if err != nil {
+					return m, tea.Batch(
+						tea.Printf("\nError filtering: %v\n", err),
+					)
+				}
+				m.table.SetRows(rows)
+				m.table.SetColumns(cols)
+			} else {
+				row := m.table.SelectedRow()
+				cols := m.table.Columns()
+				if err := saveToConfig(m.itemName, m.idDB, row, cols, m.aliases); err != nil {
+					return m, tea.Batch(
+						tea.Printf("\nError saving to config: %v\n", err),
+					)
+				}
 			}
 			return m, tea.Batch()
 		}
 	}
+
 	m.table, cmd = m.table.Update(msg)
-
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.Type {
-		case tea.KeyEnter:
-			log.Println(m.textInput.Value())
-		}
-	}
-
 	m.textInput, cmd = m.textInput.Update(msg)
 
 	return m, cmd
@@ -532,9 +581,9 @@ func main() {
 
 	ti := textinput.New()
 	ti.CharLimit = 500
-	ti.Width = 50
+	ti.Width = 1000
 
-	m := model{t, ti, *itemName, sqlQuery, idDB, tblHeight, aliases}
+	m := model{t, ti, *itemName, *sqlName, sqlQuery, idDB, tblHeight, aliases}
 	if _, err := tea.NewProgram(m).Run(); err != nil {
 		fmt.Println("Error running program:", err)
 		os.Exit(1)
