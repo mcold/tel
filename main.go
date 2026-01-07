@@ -360,14 +360,15 @@ func getContent(sqlQuery string) ([]table.Row, []table.Column, error) {
 }
 
 type model struct {
-	table     table.Model
-	textInput textinput.Model
-	itemName  string
-	sqlName   string
-	sqlQuery  string
-	idDB      int
-	height    int
-	aliases   map[string]string
+	table        table.Model
+	textInput    textinput.Model
+	itemName     string
+	sqlName      string
+	sqlQuery     string
+	idDB         int
+	height       int
+	aliases      map[string]string
+	initialFilter string
 }
 
 func (m model) filterContent(filter string) ([]table.Row, []table.Column, error) {
@@ -479,6 +480,7 @@ func main() {
 	itemName := flag.String("item", "", "Item name for config")
 	sqlName := flag.String("sql", "", "SQL query name in queries table")
 	dbName := flag.String("db", "", "Database name in dbs table")
+	filter := flag.String("filter", "", "Initial filter for text input")
 	flag.Parse()
 
 	if *itemName == "" {
@@ -582,8 +584,21 @@ func main() {
 	ti := textinput.New()
 	ti.CharLimit = 500
 	ti.Width = 1000
+	if *filter != "" {
+		ti.SetValue(*filter)
+	}
 
-	m := model{t, ti, *itemName, *sqlName, sqlQuery, idDB, tblHeight, aliases}
+	m := model{t, ti, *itemName, *sqlName, sqlQuery, idDB, tblHeight, aliases, *filter}
+
+	// Apply initial filter if provided
+	if *filter != "" {
+		rows, cols, err := m.filterContent(*filter)
+		if err == nil && len(rows) > 0 {
+			m.table.SetRows(rows)
+			m.table.SetColumns(cols)
+		}
+	}
+
 	if _, err := tea.NewProgram(m).Run(); err != nil {
 		fmt.Println("Error running program:", err)
 		os.Exit(1)
