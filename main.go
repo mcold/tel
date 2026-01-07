@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"os/user"
 	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/table"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -233,22 +235,22 @@ func applyColumnWidths(columns []table.Column, widths map[string]int, aliases ma
 		} else {
 			columns[i].Width = 20
 		}
-		if alias, ok := aliases[fieldName]; ok {
-			columns[i].Title = alias
-		}
+		// if alias, ok := aliases[fieldName]; ok {
+		// 	columns[i].Title = alias
+		// }
 	}
 	return columns
 }
 
-func insertConfig(idItem int, row table.Row, columns []table.Column, aliasToOriginal map[string]string) error {
+func insertConfig(idItem int, row table.Row, columns []table.Column, aliases map[string]string) error {
 	for i, col := range columns {
 		if i < len(row) {
 			colTitle := strings.ToUpper(col.Title)
-			if _, ok := aliasToOriginal[colTitle]; ok {
+			if _, ok := aliases[colTitle]; ok {
 				varValue := row[i]
 				_, err := sqliteDB.Exec(
 					"INSERT OR REPLACE INTO config (id_item, var, val) VALUES (?, ?, ?)",
-					idItem, colTitle, varValue,
+					idItem, aliases[colTitle], varValue,
 				)
 				if err != nil {
 					return err
@@ -268,12 +270,7 @@ func saveToConfig(itemName string, idDB int, row table.Row, columns []table.Colu
 		return err
 	}
 
-	aliasToOriginal := make(map[string]string)
-	for original, alias := range aliases {
-		aliasToOriginal[alias] = original
-	}
-
-	return insertConfig(idItem, row, columns, aliasToOriginal)
+	return insertConfig(idItem, row, columns, aliases)
 }
 
 type databaseType struct {
@@ -367,12 +364,13 @@ func getContent(sqlQuery string) ([]table.Row, []table.Column, error) {
 }
 
 type model struct {
-	table    table.Model
-	itemName string
-	sqlQuery string
-	idDB     int
-	height   int
-	aliases  map[string]string
+	table     table.Model
+	textInput textinput.Model
+	itemName  string
+	sqlQuery  string
+	idDB      int
+	height    int
+	aliases   map[string]string
 }
 
 func (m model) Init() tea.Cmd { return nil }
@@ -382,6 +380,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
+		case "tab":
+			if m.table.Focused() {
+				m.table.Blur()
+				m.textInput.Focus()
+			} else {
+				m.textInput.Blur()
+				m.table.Focus()
+			}
 		case "esc":
 			if m.table.Focused() {
 				m.table.Blur()
@@ -402,11 +408,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	m.table, cmd = m.table.Update(msg)
+
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.Type {
+		case tea.KeyEnter:
+			log.Println(m.textInput.Value())
+		}
+	}
+
+	m.textInput, cmd = m.textInput.Update(msg)
+
 	return m, cmd
 }
 
 func (m model) View() string {
-	return baseStyle.Render(m.table.View()) + "\n"
+	return baseStyle.Render(m.table.View()) + "\n" + m.textInput.View()
 }
 
 func main() {
@@ -488,6 +505,10 @@ func main() {
 		tblHeight = 10
 	}
 
+	if len(rows) < 10 {
+		tblHeight = len(rows)
+	}
+
 	tblHeight = tblHeight + 1
 
 	t := table.New(
@@ -509,7 +530,11 @@ func main() {
 		Bold(false)
 	t.SetStyles(s)
 
-	m := model{t, *itemName, sqlQuery, idDB, tblHeight, aliases}
+	ti := textinput.New()
+	ti.CharLimit = 500
+	ti.Width = 50
+
+	m := model{t, ti, *itemName, sqlQuery, idDB, tblHeight, aliases}
 	if _, err := tea.NewProgram(m).Run(); err != nil {
 		fmt.Println("Error running program:", err)
 		os.Exit(1)
