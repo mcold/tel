@@ -50,6 +50,7 @@ func main() {
 	filter := flag.String("filter", "", "Initial filter for text input")
 	args := flag.String("args", "", "JSON with placeholder args in SQL query")
 	uid := flag.String("uid", "", "UID to select row by hash from instance table")
+	viewFlag := flag.String("view", "", "View mode: 'row' or 'column'")
 	flag.Parse()
 
 	log.Printf("Parsed flags: item=%q, sql=%q, db=%q, filter=%q, uid=%q",
@@ -146,6 +147,16 @@ func main() {
 	}
 	log.Printf("widths: %v, aliases: %v, tblHeight: %d", widths, aliases, tblHeight)
 
+	view := *viewFlag
+	if view == "" {
+		view, err = config.GetQueryView(*sqlName)
+		if err != nil {
+			log.Printf("ERROR: config.GetQueryView failed for sqlName=%s: %v", *sqlName, err)
+			os.Exit(1)
+		}
+	}
+	log.Printf("view: %s", view)
+
 	if err := db.Connect(driver, connectionString); err != nil {
 		log.Printf("ERROR: database.Connect failed for driver=%s: %v", driver, err)
 		os.Exit(1)
@@ -220,9 +231,9 @@ func main() {
 		log.Printf("Initial filter applied: %q", *filter)
 	}
 
-	m := NewModel(t, ti, *itemName, *sqlName, sqlQuery, idDB, idQuery, tblHeight, aliases, *filter, *uid)
-	log.Printf("UI Model created: itemName=%s, sqlName=%s, idDB=%d, idQuery=%d, tblHeight=%d, uid=%s",
-		*itemName, *sqlName, idDB, idQuery, tblHeight, *uid)
+	m := NewModel(t, ti, *itemName, *sqlName, sqlQuery, idDB, idQuery, tblHeight, aliases, *filter, *uid, view)
+	log.Printf("UI Model created: itemName=%s, sqlName=%s, idDB=%d, idQuery=%d, tblHeight=%d, uid=%s, view=%s",
+		*itemName, *sqlName, idDB, idQuery, tblHeight, *uid, view)
 
 	if *filter != "" {
 		rows, cols, err := m.FilterContent(*filter)
@@ -232,6 +243,13 @@ func main() {
 			m.SetTable(t)
 			log.Printf("Filter applied: %d rows after filtering", len(rows))
 		}
+	} else if view == "c" {
+		// Apply vertical view for column mode without filter
+		rows, cols := ToVerticalView(rows, columns)
+		t.SetRows(rows)
+		t.SetColumns(cols)
+		m.SetTable(t)
+		log.Printf("Vertical view applied: %d rows", len(rows))
 	}
 
 	// Select row by hash if uid flag is provided

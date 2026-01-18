@@ -32,9 +32,10 @@ type Model struct {
 	initialFilter string
 	uid           string
 	filter        string
+	view          string
 }
 
-func NewModel(t table.Model, ti textinput.Model, itemName, sqlName, sqlQuery string, idDB, idQuery, height int, aliases map[string]string, initialFilter string, uid string) Model {
+func NewModel(t table.Model, ti textinput.Model, itemName, sqlName, sqlQuery string, idDB, idQuery, height int, aliases map[string]string, initialFilter string, uid string, view string) Model {
 	return Model{
 		table:         t,
 		textInput:     ti,
@@ -48,6 +49,7 @@ func NewModel(t table.Model, ti textinput.Model, itemName, sqlName, sqlQuery str
 		initialFilter: initialFilter,
 		uid:           uid,
 		filter:        initialFilter,
+		view:          view,
 	}
 }
 
@@ -57,6 +59,33 @@ func (m Model) GetTable() table.Model {
 
 func (m *Model) SetTable(t table.Model) {
 	m.table = t
+}
+
+// ToVerticalView converts horizontal row to vertical column view
+func ToVerticalView(rows []table.Row, cols []table.Column) ([]table.Row, []table.Column) {
+	if len(rows) == 0 {
+		return rows, cols
+	}
+
+	// Use first row only for column view
+	row := rows[0]
+
+	verticalRows := make([]table.Row, len(cols))
+	for i := range cols {
+		colTitle := cols[i].Title
+		var value string
+		if i < len(row) {
+			value = row[i]
+		}
+		verticalRows[i] = table.Row{colTitle, value}
+	}
+
+	verticalCols := []table.Column{
+		{Title: "column", Width: 30},
+		{Title: "val", Width: 50},
+	}
+
+	return verticalRows, verticalCols
 }
 
 func (m *Model) SelectRowByHash(targetHash string) {
@@ -113,6 +142,11 @@ func (m Model) FilterContent(filter string) ([]table.Row, []table.Column, error)
 		} else {
 			cols[i].Width = 20
 		}
+	}
+
+	// Convert to vertical view if view == 'c'
+	if m.view == "c" {
+		rows, cols = ToVerticalView(rows, cols)
 	}
 
 	return rows, cols, nil

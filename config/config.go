@@ -71,7 +71,7 @@ func Init() error {
 		, FOREIGN KEY (id_item) REFERENCES items(id)
 	);
 
-	CREATE TABLE queries
+	CREATE TABLE IF NOT EXISTS queries
 	(
 		id INTEGER
 		, id_item INTEGER
@@ -79,11 +79,12 @@ func Init() error {
 		, query TEXT
 		, config TEXT
 		, height INTEGER DEFAULT 10
+		, view CHAR(1) DEFAULT 'r'
 		, PRIMARY KEY (id)
 		, FOREIGN KEY (id_item) REFERENCES items(id)
 	);
 
-	CREATE TABLE IF NOT EXISTS instance(
+	CREATE TABLE instance(
 		uid TEXT
 		, id_query INTEGER
 		, hash CHAR(64)
@@ -168,6 +169,15 @@ func GetQueryID(sqlName string) (int, error) {
 		return 0, err
 	}
 	return id, nil
+}
+
+func GetQueryView(sqlName string) (string, error) {
+	var view string
+	err := sqliteDB.QueryRow("SELECT COALESCE(view, 'r') FROM queries WHERE name = ?", sqlName).Scan(&view)
+	if err != nil {
+		return "", err
+	}
+	return view, nil
 }
 
 func GetItemID(itemName string) (int, error) {
@@ -337,7 +347,7 @@ func GetHashByUID(uid string, idQuery int) (string, error) {
 
 func GetFilterByUID(uid string, idQuery int) (string, error) {
 	var filter string
-	err := sqliteDB.QueryRow("SELECT filter FROM instance WHERE uid = ? AND id_query = ?", uid, idQuery).Scan(&filter)
+	err := sqliteDB.QueryRow("SELECT COALESCE(filter, '') FROM instance WHERE uid = ? AND id_query = ?", uid, idQuery).Scan(&filter)
 	if err != nil {
 		return "", err
 	}

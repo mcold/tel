@@ -32,6 +32,7 @@ make build
 | `-filter` | Initial filter (SQL WHERE clause) | No |
 | `-args` | JSON file with placeholder args | No |
 | `-uid` | UID to restore previous session state | No |
+| `-view` | View mode: `row` or `column` | No |
 
 ### Examples
 
