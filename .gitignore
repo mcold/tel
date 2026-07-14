@@ -1,8 +1,10 @@
+./tel
 *.log
+logs/*.log
+.err
+.err.log
 old/
-todo
 zel/
-*test*
-TODO
-tel
-.tel
+**/instance.toml
+test_data.sqlite
+.tel/

@@ -1,0 +1,24 @@
+# Progress: File-based Metadata Storage
+
+## Started: 2026-07-14
+
+### Phase 1: File-based Instance Storage
+- [x] 1.1 Create instance storage in data/<item>/instance.toml
+- [x] 1.2 Replace config.go DB functions with file-based equivalents
+- [x] 1.3 Remove DB initialization (Init function)
+- [x] 1.4 Update main.go to remove config.Init() call
+
+### Phase 2: Hierarchical Items
+- [x] 2.1 Update ListItems to traverse nested directories
+- [x] 2.2 Support data/<item>/<subitem> structure
+- [x] 2.3 Update LoadItemConfig to handle nested paths
+
+### Phase 3: Cleanup
+- [x] 3.1 Updated .gitignore (instance.toml, test_data.sqlite, .tel/)
+- [ ] 3.2 Remove test_setup.go (no longer needed)
+- [ ] 3.3 Update README.md with new structure
+
+## Notes
+- Implementation complete
+- Build passes
+- Ready to commit

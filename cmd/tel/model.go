@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"log"
 	"strings"
@@ -10,7 +11,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"crypto/sha256"
 	"mcold/tel/config"
 	"mcold/tel/db"
 )
@@ -23,53 +23,42 @@ type Model struct {
 	table         table.Model
 	textInput     textinput.Model
 	itemName      string
-	sqlName       string
 	sqlQuery      string
-	idDB          int
-	idQuery       int
 	height        int
-	aliases       map[string]string
+	widths        map[string]int
 	initialFilter string
 	uid           string
 	filter        string
 	view          string
+	dataDir       string
 }
 
-func NewModel(t table.Model, ti textinput.Model, itemName, sqlName, sqlQuery string, idDB, idQuery, height int, aliases map[string]string, initialFilter string, uid string, view string) Model {
+func NewModel(t table.Model, ti textinput.Model, itemName, sqlQuery string, height int, widths map[string]int, initialFilter string, uid string, view string, dataDir string) Model {
 	return Model{
 		table:         t,
 		textInput:     ti,
 		itemName:      itemName,
-		sqlName:       sqlName,
 		sqlQuery:      sqlQuery,
-		idDB:          idDB,
-		idQuery:       idQuery,
 		height:        height,
-		aliases:       aliases,
+		widths:        widths,
 		initialFilter: initialFilter,
 		uid:           uid,
 		filter:        initialFilter,
 		view:          view,
+		dataDir:       dataDir,
 	}
-}
-
-func (m Model) GetTable() table.Model {
-	return m.table
 }
 
 func (m *Model) SetTable(t table.Model) {
 	m.table = t
 }
 
-// ToVerticalView converts horizontal row to vertical column view
 func ToVerticalView(rows []table.Row, cols []table.Column) ([]table.Row, []table.Column) {
 	if len(rows) == 0 {
 		return rows, cols
 	}
 
-	// Use first row only for column view
 	row := rows[0]
-
 	verticalRows := make([]table.Row, len(cols))
 	for i := range cols {
 		colTitle := cols[i].Title
@@ -104,14 +93,9 @@ func (m Model) FilterContent(filter string) ([]table.Row, []table.Column, error)
 	filter = strings.TrimPrefix(filter, "WHERE")
 	filter = strings.TrimSpace(filter)
 
-	widths, aliases, _, err := config.GetQueryConfig(m.sqlName)
-	if err != nil {
-		widths = make(map[string]int)
-		aliases = make(map[string]string)
-	}
-
 	var rows []table.Row
 	var cols []table.Column
+	var err error
 
 	if filter == "" {
 		rows, cols, err = db.GetContent(m.sqlQuery)
@@ -124,27 +108,15 @@ func (m Model) FilterContent(filter string) ([]table.Row, []table.Column, error)
 		return nil, nil, err
 	}
 
-	originalToAlias := make(map[string]string)
-	for original, alias := range aliases {
-		originalToAlias[original] = alias
-	}
-
 	for i := range cols {
 		colTitle := strings.ToUpper(cols[i].Title)
-
-		originalName := colTitle
-		if alias, ok := originalToAlias[colTitle]; ok {
-			originalName = alias
-		}
-
-		if width, ok := widths[originalName]; ok {
+		if width, ok := m.widths[colTitle]; ok {
 			cols[i].Width = width
 		} else {
 			cols[i].Width = 20
 		}
 	}
 
-	// Convert to vertical view if view == 'c'
 	if m.view == "c" {
 		rows, cols = ToVerticalView(rows, cols)
 	}
@@ -176,8 +148,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c":
 			return m, tea.Quit
 		case "enter":
+			filter := m.textInput.Value()
+
 			if m.textInput.Focused() {
-				filter := m.textInput.Value()
 				rows, cols, err := m.FilterContent(filter)
 				if err != nil {
 					return m, tea.Batch(
@@ -186,29 +159,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.table.SetRows(rows)
 				m.table.SetColumns(cols)
+			}
 
-				// Save filter to instance
-				row := m.table.SelectedRow()
-				hash := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(row, "|"))))
-				if _, err := config.SaveInstance(m.idQuery, hash, m.uid, filter); err != nil {
-					log.Printf("Error saving instance with filter: %v", err)
-				}
-			} else {
-				row := m.table.SelectedRow()
-				hash := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(row, "|"))))
-				log.Println("RowHash: ", hash)
-				cols := m.table.Columns()
-				if err := config.SaveConfigFromTable(m.itemName, m.idDB, m.uid, row, cols, m.aliases); err != nil {
-					return m, tea.Batch(
-						tea.Printf("\nError saving to config: %v\n", err),
-					)
-				}
-				uid, err := config.SaveInstance(m.idQuery, hash, m.uid, m.textInput.Value())
-				if err != nil {
-					log.Printf("Error saving instance: %v", err)
-				} else {
-					log.Printf("Instance saved: uid=%s, hash=%s", uid, hash)
-				}
+			row := m.table.SelectedRow()
+			hash := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(row, "|"))))
+			if _, err := config.SaveInstance(m.dataDir, m.itemName, hash, m.uid, filter); err != nil {
+				log.Printf("Error saving instance: %v", err)
 			}
 			return m, tea.Batch()
 		}
@@ -217,7 +173,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.table, cmd = m.table.Update(msg)
 	m.textInput, cmd = m.textInput.Update(msg)
 
-	// Update filter field when typing in text input
 	if m.textInput.Focused() {
 		m.filter = m.textInput.Value()
 	}

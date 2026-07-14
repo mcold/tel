@@ -1,0 +1,16 @@
+[connection]
+driver = "sqlite"
+dsn = "test_data.sqlite"
+
+[layout]
+height = 10
+view = "r"
+
+[layout.widths]
+ID = 6
+NAME = 18
+CATEGORY = 12
+PRICE = 10
+STOCK = 8
+
+[variables]

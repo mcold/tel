@@ -1,13 +1,11 @@
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -18,10 +16,9 @@ import (
 	"mcold/tel/db"
 )
 
-func applyColumnWidths(columns []table.Column, widths map[string]int, aliases map[string]string) []table.Column {
+func applyColumnWidths(columns []table.Column, widths map[string]int) []table.Column {
 	for i := range columns {
-		fieldName := columns[i].Title
-		if width, ok := widths[fieldName]; ok {
+		if width, ok := widths[columns[i].Title]; ok {
 			columns[i].Width = width
 		} else {
 			columns[i].Width = 20
@@ -31,7 +28,6 @@ func applyColumnWidths(columns []table.Column, widths map[string]int, aliases ma
 }
 
 func main() {
-	// Initialize log file
 	logFilePath := filepath.Join("logs", "tel.log")
 	logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
@@ -44,153 +40,74 @@ func main() {
 
 	log.Println("=== Application started ===")
 
-	itemName := flag.String("item", "", "Item name for config")
-	sqlName := flag.String("sql", "", "SQL query name in queries table")
-	dbName := flag.String("db", "", "Database name in dbs table")
+	itemName := flag.String("item", "", "Item name (required)")
 	filter := flag.String("filter", "", "Initial filter for text input")
-	args := flag.String("args", "", "JSON with placeholder args in SQL query")
-	uid := flag.String("uid", "", "UID to select row by hash from instance table")
-	viewFlag := flag.String("view", "", "View mode: 'row' or 'column'")
+	uid := flag.String("uid", "", "UID to restore session state")
+	viewFlag := flag.String("view", "", "View mode: 'r' or 'c'")
 	flag.Parse()
 
-	log.Printf("Parsed flags: item=%q, sql=%q, db=%q, filter=%q, uid=%q",
-		*itemName, *sqlName, *dbName, *filter, *uid)
-
 	if *itemName == "" {
-		log.Println("ERROR: item flag is empty")
+		fmt.Fprintln(os.Stderr, "Usage: tel -item <name> [-filter <expr>] [-uid <uid>] [-view r|c]")
 		os.Exit(1)
 	}
-	log.Printf("itemName: %s", *itemName)
 
-	if *sqlName == "" {
-		log.Println("ERROR: sql flag is empty")
-		os.Exit(1)
-	}
-	log.Printf("sqlName: %s", *sqlName)
+	dataDir := "data"
 
-	if *dbName == "" {
-		log.Println("ERROR: db flag is empty")
-		os.Exit(1)
-	}
-	log.Printf("dbName: %s", *dbName)
-
-	if err := config.Init(); err != nil {
-		log.Printf("ERROR: config.Init failed: %v", err)
-		os.Exit(1)
-	}
-	log.Println("Config initialized successfully")
-
-	idDB, err := config.GetDBID(*dbName)
+	resolvedItem, err := config.FindItem(dataDir, *itemName)
 	if err != nil {
-		log.Printf("ERROR: config.GetDBID failed for dbName=%s: %v", *dbName, err)
+		log.Printf("ERROR: FindItem failed: %v", err)
+		fmt.Fprintf(os.Stderr, "Failed to find item: %v\n", err)
 		os.Exit(1)
 	}
-	log.Printf("idDB: %d", idDB)
+	log.Printf("Resolved item: %s -> %s", *itemName, resolvedItem)
 
-	idItem, err := config.GetItemID(*itemName)
+	metaCfg, err := config.LoadItemConfig(dataDir, resolvedItem)
 	if err != nil {
-		log.Printf("ERROR: config.GetItemID failed for itemName=%s: %v", *itemName, err)
+		log.Printf("ERROR: LoadItemConfig failed: %v", err)
+		fmt.Fprintf(os.Stderr, "Failed to load item config: %v\n", err)
 		os.Exit(1)
 	}
-	log.Printf("idItem: %d", idItem)
+	log.Printf("Loaded config: driver=%s, height=%d, view=%s",
+		metaCfg.Connection.Driver, metaCfg.Layout.Height, metaCfg.Layout.View)
 
-	idQuery, err := config.GetQueryID(*sqlName)
+	sqlQuery, err := config.LoadQuery(dataDir, resolvedItem)
 	if err != nil {
-		log.Printf("ERROR: config.GetQueryID failed for sqlName=%s: %v", *sqlName, err)
+		log.Printf("ERROR: LoadQuery failed: %v", err)
+		fmt.Fprintf(os.Stderr, "Failed to load query: %v\n", err)
 		os.Exit(1)
 	}
-	log.Printf("idQuery: %d", idQuery)
+	log.Printf("Loaded query: %s", sqlQuery)
 
-	driver, err := config.GetDBDriverByID(idDB)
-	if err != nil {
-		log.Printf("ERROR: config.GetDBDriverByID failed for idDB=%d: %v", idDB, err)
+	dsn := config.ResolveDSN(&metaCfg.Connection)
+	log.Printf("DSN: %s", dsn)
+
+	if err := db.Connect(metaCfg.Connection.Driver, dsn); err != nil {
+		log.Printf("ERROR: db.Connect failed: %v", err)
+		fmt.Fprintf(os.Stderr, "Failed to connect to database: %v\n", err)
 		os.Exit(1)
 	}
-	log.Printf("driver: %s", driver)
-
-	connectionString, err := config.GetConnectionStringByID(idDB)
-	if err != nil {
-		log.Printf("ERROR: config.GetConnectionStringByID failed for idDB=%d: %v", idDB, err)
-		os.Exit(1)
-	}
-	log.Printf("connectionString: %s", connectionString)
-
-	sqlQuery, err := config.GetQueryFromDB(*sqlName)
-	if err != nil {
-		log.Printf("ERROR: config.GetQueryFromDB failed for sqlName=%s: %v", *sqlName, err)
-		os.Exit(1)
-	}
-	log.Printf("sqlQuery: %s", sqlQuery)
-
-	if *args != "" {
-		file, err := os.Open(*args)
-		if err != nil {
-			log.Printf("ERROR: can't read file args: %s: %v", *args, err)
-			os.Exit(1)
-		}
-		defer file.Close()
-
-		var data map[string]interface{}
-		json.NewDecoder(file).Decode(&data)
-		// json.Unmarshal([]byte(jsonStr), &data)
-		for k, v := range data {
-			valueStr := fmt.Sprintf("%v", v)
-			sqlQuery = strings.ReplaceAll(sqlQuery, fmt.Sprintf(":%s", k), valueStr)
-		}
-		log.Println(sqlQuery)
-	}
-
-	widths, aliases, tblHeight, err := config.GetQueryConfig(*sqlName)
-	if err != nil {
-		log.Printf("ERROR: config.GetQueryConfig failed for sqlName=%s: %v", *sqlName, err)
-		os.Exit(1)
-	}
-	log.Printf("widths: %v, aliases: %v, tblHeight: %d", widths, aliases, tblHeight)
-
-	view := *viewFlag
-	if view == "" {
-		view, err = config.GetQueryView(*sqlName)
-		if err != nil {
-			log.Printf("ERROR: config.GetQueryView failed for sqlName=%s: %v", *sqlName, err)
-			os.Exit(1)
-		}
-	}
-	log.Printf("view: %s", view)
-
-	if err := db.Connect(driver, connectionString); err != nil {
-		log.Printf("ERROR: database.Connect failed for driver=%s: %v", driver, err)
-		os.Exit(1)
-	}
-	log.Println("Database connected successfully")
+	log.Println("Database connected")
 	defer db.Close()
 
 	rows, columns, err := db.GetContent(sqlQuery)
 	if err != nil {
-		log.Printf("ERROR: database.GetContent failed: %v", err)
+		log.Printf("ERROR: db.GetContent failed: %v", err)
 		os.Exit(1)
 	}
 	log.Printf("Retrieved %d rows, %d columns", len(rows), len(columns))
 
 	if len(rows) == 0 || len(columns) == 0 {
-		log.Println("ERROR: No rows or columns retrieved from database")
+		log.Println("ERROR: No rows or columns retrieved")
 		os.Exit(1)
 	}
 
-	columns = applyColumnWidths(columns, widths, aliases)
-	log.Printf("Applied column widths: %d columns processed", len(columns))
+	columns = applyColumnWidths(columns, metaCfg.Layout.Widths)
 
-	if tblHeight == 0 {
-		tblHeight = 10
-		log.Println("tblHeight was 0, set to default 10")
-	}
-
-	if len(rows) < 10 {
+	tblHeight := metaCfg.Layout.Height
+	if len(rows) < tblHeight {
 		tblHeight = len(rows)
-		log.Printf("tblHeight adjusted to %d (rows count)", tblHeight)
 	}
-
-	tblHeight = tblHeight + 1
-	log.Printf("Final tblHeight: %d", tblHeight)
+	tblHeight++
 
 	t := table.New(
 		table.WithColumns(columns),
@@ -215,25 +132,25 @@ func main() {
 	ti.CharLimit = 500
 	ti.Width = 1000
 
-	// Load filter from instance table if uid is provided and filter flag is empty
 	if *filter == "" && *uid != "" {
-		loadedFilter, err := config.GetFilterByUID(*uid, idQuery)
+		loadedFilter, err := config.GetFilterByUID(dataDir, resolvedItem, *uid)
 		if err != nil {
-			log.Printf("WARN: GetFilterByUID failed for uid=%s, idQuery=%d: %v", *uid, idQuery, err)
+			log.Printf("WARN: GetFilterByUID failed: %v", err)
 		} else if loadedFilter != "" {
 			*filter = loadedFilter
-			log.Printf("Filter loaded from instance: %q", *filter)
 		}
 	}
 
 	if *filter != "" {
 		ti.SetValue(*filter)
-		log.Printf("Initial filter applied: %q", *filter)
 	}
 
-	m := NewModel(t, ti, *itemName, *sqlName, sqlQuery, idDB, idQuery, tblHeight, aliases, *filter, *uid, view)
-	log.Printf("UI Model created: itemName=%s, sqlName=%s, idDB=%d, idQuery=%d, tblHeight=%d, uid=%s, view=%s",
-		*itemName, *sqlName, idDB, idQuery, tblHeight, *uid, view)
+	view := *viewFlag
+	if view == "" {
+		view = metaCfg.Layout.View
+	}
+
+	m := NewModel(t, ti, resolvedItem, sqlQuery, tblHeight, metaCfg.Layout.Widths, *filter, *uid, view, dataDir)
 
 	if *filter != "" {
 		rows, cols, err := m.FilterContent(*filter)
@@ -241,24 +158,17 @@ func main() {
 			t.SetRows(rows)
 			t.SetColumns(cols)
 			m.SetTable(t)
-			log.Printf("Filter applied: %d rows after filtering", len(rows))
 		}
 	} else if view == "c" {
-		// Apply vertical view for column mode without filter
 		rows, cols := ToVerticalView(rows, columns)
 		t.SetRows(rows)
 		t.SetColumns(cols)
 		m.SetTable(t)
-		log.Printf("Vertical view applied: %d rows", len(rows))
 	}
 
-	// Select row by hash if uid flag is provided
 	if *uid != "" {
-		hash, err := config.GetHashByUID(*uid, idQuery)
-		if err != nil {
-			log.Printf("WARN: GetHashByUID failed for uid=%s, idQuery=%d: %v", *uid, idQuery, err)
-		} else {
-			log.Printf("Looking for row with hash=%s", hash)
+		hash, err := config.GetHashByUID(dataDir, resolvedItem, *uid)
+		if err == nil {
 			m.SelectRowByHash(hash)
 		}
 	}

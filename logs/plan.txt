@@ -1,0 +1,50 @@
+# Plan: File-based Metadata Storage
+
+## Goal
+Replace DB-based instance storage (uid, hash, filter) with file-based storage in the data/ directory structure.
+
+## Current State
+- config/config.go: Stores instances in SQLite DB at ~/.tel/tel.db
+- config/fileconfig.go: Already loads meta.toml and query.sql from data/<item>/
+- Data structure exists: data/users/, data/products/
+
+## Implementation Plan
+
+### Phase 1: File-based Instance Storage
+- [ ] 1.1 Create instance storage in data/<item>/instance.toml
+      - Store uid, hash, filter per item
+      - Use TOML format for consistency
+- [ ] 1.2 Replace config.go DB functions with file-based equivalents
+      - SaveInstance → write to instance.toml
+      - GetHashByUID → read from instance.toml
+      - GetFilterByUID → read from instance.toml
+- [ ] 1.3 Remove DB initialization (Init function)
+- [ ] 1.4 Update main.go to remove config.Init() call
+
+### Phase 2: Hierarchical Items
+- [ ] 2.1 Update ListItems to traverse nested directories
+- [ ] 2.2 Support data/<item>/<subitem> structure
+- [ ] 2.3 Update LoadItemConfig to handle nested paths
+
+### Phase 3: Cleanup
+- [ ] 3.1 Remove test_setup.go (no longer needed)
+- [ ] 3.2 Remove .tel/ directory (DB no longer used)
+- [ ] 3.3 Update README.md with new structure
+
+## File Structure After Changes
+```
+data/
+├── <item>/
+│   ├── meta.toml        -- connection settings
+│   ├── query.sql        -- SQL query
+│   ├── instance.toml    -- uid, hash, filter (per session)
+│   └── <subitem>/
+│       ├── meta.toml
+│       ├── query.sql
+│       └── instance.toml
+```
+
+## Notes
+- Keep backward compatibility where possible
+- Use same TOML format for consistency
+- Instance files should be in .gitignore (session-specific)

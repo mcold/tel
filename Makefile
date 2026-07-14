@@ -10,7 +10,7 @@ build:
 
 run: build
 	@echo "Running $(BINARY_NAME)..."
-	./$(BINARY_NAME)
+	./$(BINARY_NAME) -item users
 
 clean:
 	@echo "Cleaning..."
@@ -20,14 +20,13 @@ clean:
 
 lint:
 	@echo "Running linter..."
-	gofumpt -w .
-	golint ./...
+	go vet ./...
 	@echo "Done"
 
 help:
 	@echo "Available targets:"
 	@echo "  build  - Build the binary"
-	@echo "  run    - Build and run the binary"
+	@echo "  run    - Build and run with default item (users)"
 	@echo "  clean  - Remove binary and log files"
-	@echo "  lint   - Run formatters and linters"
+	@echo "  lint   - Run go vet"
 	@echo "  help   - Show this help message"
