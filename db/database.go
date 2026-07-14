@@ -9,7 +9,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/table"
 	_ "github.com/jackc/pgx/v5/stdlib"
-	_ "github.com/marcboeker/go-duckdb/v2"
+	_ "github.com/duckdb/duckdb-go/v2"
 	_ "modernc.org/sqlite"
 )
 
